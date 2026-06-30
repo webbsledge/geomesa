@@ -34,8 +34,6 @@ class FsCompactCommand extends CompactCommand with FsDistributedCommand
 
 object FsCompactCommand {
 
-  import scala.collection.JavaConverters._
-
   trait CompactCommand extends FsDataStoreCommand with DistributedCommand with LazyLogging {
 
     override val name: String = "compact"
@@ -50,8 +48,8 @@ object FsCompactCommand {
 
       val storage = ds.storage(params.featureName)
 
-      val toCompact = if (params.loadedPartitions.isEmpty) { storage.metadata.getFiles().map(_.partition).distinct } else {
-        val filtered = params.loadedPartitions.filter(storage.metadata.getFiles(_).nonEmpty)
+      val toCompact = if (params.loadedPartitions.isEmpty) { storage.metadata.partitions() } else {
+        val filtered = params.loadedPartitions.filter(storage.metadata.files().forPartition(_).scan().nonEmpty)
         if (filtered.isEmpty) {
           throw new ParameterException(s"Partition(s) did not match any files: ${params.loadedPartitions.mkString(", ")}")
         } else if (filtered.size != params.loadedPartitions.size) {
@@ -83,7 +81,7 @@ object FsCompactCommand {
                   override def run(): Unit = {
                     try {
                       logger.info(s"Compacting $p")
-                      storage.compact(p)
+                      storage.metadata.compact(p)
                     } catch {
                       case NonFatal(e) => logger.error(s"Error processing partition '$p':", e)
                     } finally {

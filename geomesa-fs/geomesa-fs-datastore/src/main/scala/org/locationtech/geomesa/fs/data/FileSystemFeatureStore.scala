@@ -9,6 +9,7 @@
 package org.locationtech.geomesa.fs.data
 
 import com.typesafe.scalalogging.LazyLogging
+import org.apache.iceberg.types.{Conversions, Types}
 import org.geotools.api.data.{FeatureReader, FeatureWriter, Query, QueryCapabilities}
 import org.geotools.api.feature.simple.{SimpleFeature, SimpleFeatureType}
 import org.geotools.api.filter.Filter
@@ -20,16 +21,17 @@ import org.locationtech.geomesa.features.ScalaSimpleFeature
 import org.locationtech.geomesa.fs.data.FileSystemDataStore.FileSystemDataStoreConfig
 import org.locationtech.geomesa.fs.data.FileSystemFeatureStore._
 import org.locationtech.geomesa.fs.storage.core.FileSystemStorage.FileSystemWriter
-import org.locationtech.geomesa.fs.storage.core.{CloseableFeatureIterator, FileSystemStorage, Partition}
+import org.locationtech.geomesa.fs.storage.core.schema.{BoundingBoxField, ColumnName}
+import org.locationtech.geomesa.fs.storage.core.{FileSystemStorage, Partition}
 import org.locationtech.geomesa.index.geotools.{FastSettableFeatureWriter, GeoMesaFeatureWriter}
 import org.locationtech.geomesa.index.utils.ThreadManagement.{LowLevelScanner, ManagedScan, Timeout}
+import org.locationtech.geomesa.utils.collection.CloseableIterator
 import org.locationtech.geomesa.utils.io.{CloseQuietly, CloseWithLogging}
-import org.locationtech.jts.geom.Geometry
 
 import java.io.Closeable
 import java.util.Map.Entry
+import java.util.concurrent._
 import java.util.concurrent.atomic.{AtomicBoolean, AtomicLong}
-import java.util.concurrent.{ConcurrentHashMap, Executors, RejectedExecutionException, ScheduledFuture, TimeUnit}
 import java.util.function.BiFunction
 import scala.util.control.NonFatal
 
@@ -40,7 +42,7 @@ class FileSystemFeatureStore(
     config: FileSystemDataStoreConfig,
   ) extends ContentFeatureStore(entry, query) with LazyLogging {
 
-  private val sft = storage.metadata.sft
+  private val sft = storage.sft
 
   override def getWriterInternal(query: Query, flags: Int): FeatureWriter[SimpleFeatureType, SimpleFeature] = {
     // note: check update first as sometimes we get ADD | UPDATE
@@ -57,21 +59,29 @@ class FileSystemFeatureStore(
 
   override def getBoundsInternal(query: Query): ReferencedEnvelope = {
     val envelope = new ReferencedEnvelope(org.locationtech.geomesa.utils.geotools.CRS_EPSG_4326)
-    Option(sft.getGeometryDescriptor).foreach { g =>
-      val i = sft.indexOf(g.getLocalName)
-      storage.metadata.getFiles(query.getFilter).foreach { file =>
-        file.bounds.find(_.attribute == i).foreach { b =>
-          b.decode(sft).productIterator.foreach {
-            case g: Geometry => envelope.expandToInclude(g.getEnvelopeInternal)
-          }
-        }
+    val bboxFieldName = BoundingBoxField.groupName(ColumnName.encode(sft.getGeometryDescriptor.getLocalName))
+    val bboxField = storage.schema.schema.findField(bboxFieldName).`type`().asStructType()
+    val (minFieldIds, maxFieldIds) =
+      Seq(BoundingBoxField.XMin, BoundingBoxField.YMin, BoundingBoxField.XMax, BoundingBoxField.YMax)
+        .map(f => bboxField.field(f).fieldId())
+        .splitAt(2)
+    storage.metadata.files().includeFileStats().forFilter(query.getFilter).scan().foreach { f =>
+      val minBuffers = minFieldIds.map(f.lowerBounds().get)
+      val maxBuffers = maxFieldIds.map(f.upperBounds().get)
+      if (!minBuffers.contains(null) && !maxBuffers.contains(null)) {
+        val Seq(xmin, ymin) = minBuffers.map(Conversions.fromByteBuffer[Float](Types.FloatType.get(), _))
+        val Seq(xmax, ymax) = maxBuffers.map(Conversions.fromByteBuffer[Float](Types.FloatType.get(), _))
+        envelope.expandToInclude(xmin, ymin)
+        envelope.expandToInclude(xmax, ymax)
       }
     }
     envelope
   }
 
-  override def getCountInternal(query: Query): Int =
-    storage.metadata.getFiles(query.getFilter).map(_.count).sum.toInt
+  override def getCountInternal(query: Query): Int = {
+    val count = storage.metadata.files().forFilter(query.getFilter).scan().map(_.recordCount()).sum
+    if (count.isValidInt) { count.toInt } else { Int.MaxValue }
+  }
 
   override def getReaderInternal(original: Query): FeatureReader[SimpleFeatureType, SimpleFeature] = {
     import org.locationtech.geomesa.index.conf.QueryHints._
@@ -125,7 +135,7 @@ object FileSystemFeatureStore {
   private class FileSystemScanner(storage: FileSystemStorage, val query: Query, threads: Int)
       extends LowLevelScanner[SimpleFeature] {
 
-    private var reader: CloseableFeatureIterator = _
+    private var reader: CloseableIterator[SimpleFeature] = _
 
     override def iterator: Iterator[SimpleFeature] = synchronized {
       reader = storage.getReader(query, threads = threads)
@@ -146,7 +156,7 @@ object FileSystemFeatureStore {
     *
     * @param iter delegate iterator
     */
-  private class FileSystemFeatureIterator(iter: CloseableFeatureIterator)
+  private class FileSystemFeatureIterator(iter: CloseableIterator[SimpleFeature])
       extends java.util.Iterator[SimpleFeature] with Closeable {
     override def hasNext: Boolean = iter.hasNext
     override def next(): SimpleFeature = iter.next()
@@ -239,7 +249,7 @@ object FileSystemFeatureStore {
 
     override def write(): Unit = {
       val sf = GeoMesaFeatureWriter.featureWithFid(feature)
-      val partition = Partition(storage.metadata.schemes.map(_.getPartition(sf)))
+      val partition = Partition(storage.schemes.map(_.getPartition(sf)))
       writers.compute(partition, computeForWrite).write(sf)
       feature = null
       if (writers.size() > maxOpenPartitions) {

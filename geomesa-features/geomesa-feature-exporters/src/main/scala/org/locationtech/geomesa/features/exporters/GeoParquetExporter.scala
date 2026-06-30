@@ -12,7 +12,7 @@ import com.typesafe.scalalogging.LazyLogging
 import org.apache.hadoop.conf.Configuration
 import org.geotools.api.feature.simple.{SimpleFeature, SimpleFeatureType}
 import org.locationtech.geomesa.fs.storage.core.fs.{LocalObjectStore, ObjectStore, S3ObjectStore}
-import org.locationtech.geomesa.fs.storage.parquet.io.ParquetFileSystemWriter
+import org.locationtech.geomesa.fs.storage.core.parquet.io.ParquetFileSystemWriter
 import org.locationtech.geomesa.utils.io.{CloseWithLogging, PathUtils}
 
 /**
@@ -44,7 +44,7 @@ class GeoParquetExporter(path: String) extends FeatureExporter with LazyLogging 
       case s => throw new UnsupportedOperationException(s"No implementation available for writing to scheme: $s")
     }
 
-    writer = new ParquetFileSystemWriter(fs, conf, sft, uri)
+    writer = new ParquetFileSystemWriter(sft, conf, fs, uri)
   }
 
   override def export(features: Iterator[SimpleFeature]): Option[Long] = {

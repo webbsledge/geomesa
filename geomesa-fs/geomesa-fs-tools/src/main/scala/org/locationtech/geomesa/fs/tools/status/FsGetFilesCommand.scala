@@ -10,40 +10,33 @@ package org.locationtech.geomesa.fs.tools.status
 
 import com.beust.jcommander.Parameters
 import org.geotools.filter.text.ecql.ECQL
-import org.locationtech.geomesa.fs.storage.core.StorageMetadata
 import org.locationtech.geomesa.fs.tools.FsDataStoreCommand
 import org.locationtech.geomesa.fs.tools.FsDataStoreCommand.{FsParams, PartitionParam}
 import org.locationtech.geomesa.fs.tools.status.FsGetFilesCommand.FSGetFilesParams
 import org.locationtech.geomesa.tools.{Command, OptionalCqlFilterParam, RequiredTypeNameParam}
 
-import java.time.Instant
-import java.util.Locale
-
 class FsGetFilesCommand extends FsDataStoreCommand {
-
-  import org.locationtech.geomesa.utils.geotools.GeoToolsDateFormat
 
   override val params = new FSGetFilesParams
 
   override val name: String = "get-files"
 
   override def execute(): Unit = withDataStore { ds =>
-    val storage = ds.storage(params.featureName)
-    val metadata = storage.metadata
+    val metadata = ds.storage(params.featureName).metadata
 
     lazy val fromFilter = {
       Command.user.info(s"Listing files for filter: ${ECQL.toCQL(params.cqlFilter)}")
-      metadata.getFiles(params.cqlFilter)
+      metadata.files().forFilter(params.cqlFilter).scan()
     }
     lazy val fromPartitions = {
       Command.user.info(s"Listing files for partition(s): ${params.loadedPartitions.mkString(", ")}")
-      params.loadedPartitions.flatMap(metadata.getFiles)
+      params.loadedPartitions.flatMap(metadata.files().forPartition(_).scan())
     }
 
     val files =
       if (params.cqlFilter == null && params.loadedPartitions.isEmpty) {
         Command.user.info("Listing files for all partitions")
-        metadata.getFiles()
+        metadata.files().scan()
       } else if (params.loadedPartitions.isEmpty) {
         fromFilter
       } else if (params.cqlFilter == null) {
@@ -52,12 +45,11 @@ class FsGetFilesCommand extends FsDataStoreCommand {
         (fromFilter ++ fromPartitions).distinct
       }
 
-    files.groupBy(_.partition).toSeq.sortBy(_._1.toString).foreach { case (p, files) =>
+    files.groupBy(f => metadata.partition(f)).toSeq.sortBy(_._1.toString).foreach { case (p, files) =>
       Command.output.info(s"$p:")
-      // sort by chronological order
-      files.sorted(StorageMetadata.StorageFileOrdering.reverse).foreach { f =>
-        Command.output.info(s"  ${f.file} ${f.action.toString.toUpperCase(Locale.US)} " +
-          s"${GeoToolsDateFormat.format(Instant.ofEpochMilli(f.timestamp))} ${f.count} features")
+      // sort by record count descending
+      files.sortBy(_.recordCount())(Ordering[Long].reverse).foreach { f =>
+        Command.output.info(s"  ${f.location()} ${f.recordCount()} features")
       }
     }
   }

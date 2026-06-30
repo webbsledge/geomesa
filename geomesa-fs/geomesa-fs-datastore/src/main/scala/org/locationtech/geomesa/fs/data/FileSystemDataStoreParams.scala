@@ -8,9 +8,8 @@
 
 package org.locationtech.geomesa.fs.data
 
-import org.locationtech.geomesa.fs.storage.core.metadata.{ConverterMetadata, FileBasedMetadata, JdbcMetadata}
-import org.locationtech.geomesa.fs.storage.core.{FileSystemStorageFactory, StorageMetadataCatalog}
-import org.locationtech.geomesa.fs.storage.parquet.ParquetFileSystemStorage
+import org.apache.iceberg.CatalogUtil
+import org.locationtech.geomesa.fs.storage.converter.ConverterCatalog
 import org.locationtech.geomesa.index.geotools.GeoMesaDataStoreFactory
 import org.locationtech.geomesa.index.geotools.GeoMesaDataStoreFactory.NamespaceParams
 import org.locationtech.geomesa.security.SecurityParams
@@ -33,25 +32,26 @@ trait FileSystemDataStoreParams extends SecurityParams with NamespaceParams {
       "fs.path",
       "Root of the filesystem hierarchy",
       optional = false,
-      supportsNiFiExpressions = true
-    )
-
-  val EncodingParam =
-    new GeoMesaParam[String](
-      "fs.encoding",
-      "Encoding to use for data files",
-      default = ParquetFileSystemStorage.Encoding,
-      enumerations = FileSystemStorageFactory.factories.map(_.encoding),
       supportsNiFiExpressions = true,
-      readWrite = ReadWriteFlag.ReadWrite
+      readWrite = ReadWriteFlag.ReadWrite,
     )
 
-  val MetadataTypeParam =
+  val CatalogTypeParam =
     new GeoMesaParam[String](
-      StorageMetadataCatalog.MetadataTypeConfig,
-      "Type of metadata to use",
-      default = "", // needed to prevent geoserver from selecting something
-      enumerations = Seq(FileBasedMetadata.MetadataType, JdbcMetadata.MetadataType, ConverterMetadata.MetadataType),
+      "fs.catalog.type",
+      s"Type of data catalog to use, either an Iceberg catalog class or '${ConverterCatalog.CatalogType}'. Alternatively, " +
+        "an Iceberg catalog can be specified through config with 'catalog-impl'",
+      default = "",
+      enumerations = Seq(
+        CatalogUtil.ICEBERG_CATALOG_TYPE_HADOOP,
+        CatalogUtil.ICEBERG_CATALOG_TYPE_HIVE,
+        CatalogUtil.ICEBERG_CATALOG_TYPE_REST,
+        CatalogUtil.ICEBERG_CATALOG_TYPE_GLUE,
+        CatalogUtil.ICEBERG_CATALOG_TYPE_NESSIE,
+        CatalogUtil.ICEBERG_CATALOG_TYPE_JDBC,
+        CatalogUtil.ICEBERG_CATALOG_TYPE_BIGQUERY,
+        ConverterCatalog.CatalogType,
+      ),
       supportsNiFiExpressions = true,
       readWrite = ReadWriteFlag.ReadWrite,
     )
