@@ -42,6 +42,7 @@
         <module>geomesa-security</module>
         <module>geomesa-spark</module>
         <module>geomesa-tools</module>
+        <module>geomesa-trino</module>
         <module>geomesa-utils-parent</module>
         <module>geomesa-z3</module>
         <module>docs</module>
@@ -52,7 +53,9 @@
 
         <!-- java/scala -->
         <jdk.version>17</jdk.version>
+        <trino.jdk.version>25</trino.jdk.version>
         <scala.version>2.12.21</scala.version> <!-- 2.12.18 is minimum required to support java 21 -->
+
         <scala.binary.version>2.12</scala.binary.version>
         <scala.xml.version>2.2.0</scala.xml.version>
         <scala.parsers.version>2.3.0</scala.parsers.version>
@@ -103,6 +106,7 @@
         <s2.geometry.version>20250620-rc1</s2.geometry.version>
         <sizeof.version>0.4.4</sizeof.version>
         <spring.security.version>5.8.16</spring.security.version> <!-- geoserver is still on 5.x -->
+        <trino.version>481</trino.version>
         <typesafe.config.version>1.4.3</typesafe.config.version>
         <zstd.version>1.5.7-7</zstd.version>
 
@@ -122,7 +126,7 @@
         <!-- test dependencies -->
         <specs2.version>4.23.0</specs2.version>
         <junit.version>4.13.2</junit.version>
-        <junit.jupiter.version>5.9.3</junit.jupiter.version>
+        <junit.jupiter.version>5.12.2</junit.jupiter.version> <!-- geomesa-trino test discovery requires 5.12+ -->
         <testcontainers.version>2.0.3</testcontainers.version>
         <testcontainers.accumulo.version>1.6.0</testcontainers.accumulo.version>
         <testcontainers.hbase.version>1.2.0</testcontainers.hbase.version>
@@ -1131,6 +1135,11 @@
                 <groupId>org.apache.accumulo</groupId>
                 <artifactId>accumulo-access</artifactId>
                 <version>${accumulo.access.version}</version>
+            </dependency>
+            <dependency>
+                <groupId>io.trino</groupId>
+                <artifactId>trino-jdbc</artifactId>
+                <version>${trino.version}</version>
             </dependency>
             <dependency>
                 <groupId>com.esotericsoftware</groupId>
