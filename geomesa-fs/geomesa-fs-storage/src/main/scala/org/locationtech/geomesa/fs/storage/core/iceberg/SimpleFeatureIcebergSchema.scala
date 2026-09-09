@@ -119,36 +119,35 @@ object SimpleFeatureIcebergSchema extends LazyLogging {
   def apply(table: Table, namespace: Option[String] = None): SimpleFeatureIcebergSchema = {
     val sft = {
       val typeName = table.properties().get("geomesa.sft.name")
-      val attributes = table.schema().columns().asScala.flatMap(deriveDescriptor)
-      if (attributes.isEmpty) {
-        // back compatibility check
-        SimpleFeatureTypes.createType(namespace.fold(typeName)(n => s"$n:$typeName"), table.properties().get("geomesa.sft.spec"))
-      } else {
-        val b = new SimpleFeatureTypeBuilder()
-        b.setNamespaceURI(namespace.orNull) // important to set this null if not defined so it doesn't default to gml namespace
-        b.setName(typeName)
-        b.addAll(attributes.asJava)
-        attributes.find(d => d.getUserData.get(AttributeOptions.OptDefault) == "true" && d.isInstanceOf[GeometryDescriptor]).foreach { d =>
-          b.setDefaultGeometry(d.getLocalName)
-        }
-        val sft = b.buildFeatureType()
-        table.properties().asScala.foreach { case (k, v) =>
-          if (k.startsWith(IcebergCatalog.UserDataPrefix)) {
-            sft.getUserData.put(k.substring(IcebergCatalog.UserDataPrefix.length), v)
-          }
-        }
-        sft
+      val attributes = table.schema().columns().asScala.flatMap(deriveDescriptor(_, table.properties()))
+      val b = new SimpleFeatureTypeBuilder()
+      b.setNamespaceURI(namespace.orNull) // important to set this null if not defined so it doesn't default to gml namespace
+      b.setName(typeName)
+      b.addAll(attributes.asJava)
+      attributes.find(d => d.getUserData.get(AttributeOptions.OptDefault) == "true" && d.isInstanceOf[GeometryDescriptor]).foreach { d =>
+        b.setDefaultGeometry(d.getLocalName)
       }
+      val sft = b.buildFeatureType()
+      table.properties().asScala.foreach { case (k, v) =>
+        if (k.startsWith(IcebergCatalog.UserDataPrefix)) {
+          sft.getUserData.put(k.substring(IcebergCatalog.UserDataPrefix.length), v)
+        }
+      }
+      sft
     }
     new SimpleFeatureIcebergSchema(sft, table.schema())
   }
 
-  private def deriveDescriptor(f: NestedField): Option[AttributeDescriptor] = {
+  private def deriveDescriptor(f: NestedField, properties: java.util.Map[String, String]): Option[AttributeDescriptor] = {
     if (f.name().startsWith(InternalFieldDelimiter) && f.name().endsWith(InternalFieldDelimiter)) { None } else {
-      Option(f.doc()).flatMap { d =>
-        try { Some(SimpleFeatureTypes.createDescriptor(d)) } catch {
-          case NonFatal(e) => logger.warn(s"Error parsing column doc as descriptor: $d", e); None
-        }
+      // the spec is a table property - not a column doc
+      val key = IcebergCatalog.columnSpecProperty(f.name())
+      Option(properties.get(key)) match {
+        case None => logger.warn(s"No attribute spec for column '${f.name()}' (expected property '$key')"); None
+        case Some(d) =>
+          try { Some(SimpleFeatureTypes.createDescriptor(d)) } catch {
+            case NonFatal(e) => logger.warn(s"Error parsing column spec as descriptor: $d", e); None
+          }
       }
     }
   }
@@ -171,26 +170,21 @@ object SimpleFeatureIcebergSchema extends LazyLogging {
     sft.getAttributeDescriptors.asScala.foreach { d =>
       val name = ColumnName(d.getLocalName)
       val objectType = ObjectType.selectType(d)
-      val doc = SimpleFeatureTypes.encodeDescriptor(sft, d)
+      // no doc is written: an attribute spec does not fit in a column comment once it carries a
+      // structural type definition, so every attribute's spec is a table property - see columnSpecs
       if (objectType.head == ObjectType.GEOMETRY) {
         // TODO supports native geometry encoding
         require(geometries == GeometryEncoding.GeoParquetWkb, "Only WKB encoding is supported for Geometry types")
-        val geomDoc = {
-          // note: geotools AttributeTypeBuilder shares the user data map - reparse instead so we don't change the original
-          val descriptor = SimpleFeatureTypes.createDescriptor(doc)
-          descriptor.getUserData.put(GeometryEncodingKey, geometries.toString)
-          SimpleFeatureTypes.encodeDescriptor(sft, d)
-        }
         // not yet supported in spark or trino: GeometryType.crs84()
-        builder += buildField(name.column, fieldIds.getAndIncrement(), geomDoc, BinaryType.get())
+        builder += buildField(name.column, fieldIds.getAndIncrement(), null, BinaryType.get())
         builder += BoundingBoxField.icebergSchema(name.column, fieldIds)
         builder += ZValueField.icebergSchema(name.column, objectType(1), fieldIds)
       } else if (objectType.last == ObjectType.JSON) {
         builder +=
-          buildField(name.column, fieldIds.getAndIncrement(), doc,
+          buildField(name.column, fieldIds.getAndIncrement(), null,
             d.getJsonSchema().fold[Type](VariantType.get())(buildStructuralType(_, () => fieldIds.getAndIncrement())))
       } else {
-        builder += buildField(name.column, fieldIds.getAndIncrement(), doc, getType(objectType, fieldIds))
+        builder += buildField(name.column, fieldIds.getAndIncrement(), null, getType(objectType, fieldIds))
       }
     }
 
@@ -208,6 +202,22 @@ object SimpleFeatureIcebergSchema extends LazyLogging {
    */
   private def buildField(name: String, fieldId: Int, doc: String, fieldType: Type): NestedField =
     NestedField.optional(name).withId(fieldId).withDoc(doc).ofType(fieldType).build()
+
+  /**
+   * Every column mapped to its full attribute spec, for the table properties that
+   * `IcebergCatalog.columnSpecProperty` names.
+   *
+   * These are the description of the feature type that a written table carries.
+   *
+   * @param sft simple feature type
+   * @return storage column name to attribute spec
+   */
+  private[iceberg] def columnSpecs(sft: SimpleFeatureType): Map[String, String] = {
+    val specs = sft.getAttributeDescriptors.asScala.map { d =>
+      ColumnName(d.getLocalName).column -> SimpleFeatureTypes.encodeDescriptor(sft, d)
+    }
+    specs.toMap
+  }
 
   /**
    * Builds the schema type for an attribute
